@@ -1,0 +1,106 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+---
+name: Manual Build and Package ZIP
+
+on:
+    workflow_dispatch:
+        inputs:
+            locale:
+                description: 'Locale(s) to build (e.g. en, zh-CN, or "en zh-CN" for both)'
+                required: false
+                default: 'en zh-CN'
+            create_release:
+                description: 'Create a GitHub Release with the ZIP (true/false)'
+                required: false
+                default: 'false'
+            release_tag:
+                description: 'Release tag name (only used when create_release is true, e.g. build-20240101)'
+                required: false
+                default: ''
+
+jobs:
+    build-and-zip:
+        name: Build and Package ZIP
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Use Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+
+            - name: Install dependencies
+              run: |
+                  npm install -g yarn
+                  yarn cache clean
+                  yarn
+
+            - name: Build
+              run: |
+                  # Validate and sanitize locale input — only allow known safe locale identifiers
+                  RAW_LOCALES="${{ github.event.inputs.locale }}"
+                  LOCALE_ARGS=""
+                  for loc in $RAW_LOCALES; do
+                    if [[ "$loc" =~ ^[a-zA-Z]{2}(-[a-zA-Z]{2,4})?$ ]]; then
+                      LOCALE_ARGS="$LOCALE_ARGS --locale $loc"
+                    else
+                      echo "::error::Invalid locale value: '$loc'. Expected format: 'en', 'zh-CN', etc."
+                      exit 1
+                    fi
+                  done
+                  export NODE_OPTIONS=--max-old-space-size=8192
+                  PWA_SERVICE_WORKER_URL=https://doris.apache.org/sw.js yarn docusaurus build $LOCALE_ARGS
+
+            - name: Package build output as ZIP
+              run: |
+                  BUILD_DATE=$(date +%Y%m%d-%H%M%S)
+                  ZIP_NAME="doris-website-build-${BUILD_DATE}.zip"
+                  echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+                  cd build
+                  zip -r "../${ZIP_NAME}" .
+                  cd ..
+                  echo "ZIP size: $(du -sh ${ZIP_NAME})"
+
+            - name: Upload ZIP as workflow artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.ZIP_NAME }}
+                  path: ${{ env.ZIP_NAME }}
+                  retention-days: 7
+
+            - name: Create GitHub Release
+              if: ${{ github.event.inputs.create_release == 'true' }}
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('build-{0}', github.run_number) }}
+                  name: Website Build ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('#{0}', github.run_number) }}
+                  body: |
+                      Automated website build artifact.
+
+                      - **Branch**: ${{ github.ref_name }}
+                      - **Commit**: ${{ github.sha }}
+                      - **Locale(s)**: ${{ github.event.inputs.locale }}
+                  files: ${{ env.ZIP_NAME }}
+                  token: ${{ github.token }}
